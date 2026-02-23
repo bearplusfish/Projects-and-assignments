@@ -1,0 +1,946 @@
+---
+title: "A3"
+output: html_document
+date: "2025-05-15"
+---
+
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(summarytools)
+library(DataExplorer)
+library(corrplot)
+library(dplyr)
+library(zoo)  #rollmean smoothness
+library(MLmetrics)
+library(caret)
+library(randomForest)
+library(pROC)
+library(ROSE)
+library(ggrepel)
+library(viridis)
+
+stroke_data <- read.csv("D:/Desktop/2025S1/HTIN5006/A3/brain_stroke.csv")
+stroke_data
+```
+
+# EDA
+```{r cars}
+#  check data structure
+str(stroke_data)
+
+# 
+head(stroke_data)
+
+# data dimension
+dim(stroke_data)
+
+#  missing values
+colSums(is.na(stroke_data))
+
+# Descriptive statistics (numerical variables)
+summary(select_if(stroke_data, is.numeric))
+
+# Descriptive statistics (categorical variables)
+lapply(select_if(stroke_data, is.factor), table)
+```
+
+```{r}
+# Calculate the number of missing values in each column
+missing_counts <- colSums(is.na(stroke_data))
+print(missing_counts)
+
+# Calculate the proportion of missing values in each column
+missing_ratios <- colMeans(is.na(stroke_data))
+print(missing_ratios)
+
+# Summarize and display the missing situations (only show the missing columns)
+missing_summary <- data.frame(
+  Variable = names(missing_counts),
+  MissingCount = missing_counts,
+  MissingRatio = missing_ratios
+)
+
+missing_summary[missing_summary$MissingCount > 0, ]
+```
+
+
+```{r}
+# Convert the categorical variable to factor
+stroke_data$ever_married <- as.factor(stroke_data$ever_married)
+stroke_data$work_type <- as.factor(stroke_data$work_type)
+stroke_data$Residence_type <- as.factor(stroke_data$Residence_type)
+stroke_data$smoking_status <- as.factor(stroke_data$smoking_status)
+stroke_data$stroke <- as.factor(stroke_data$stroke)
+```
+
+
+```{r}
+#Some visual analyses
+
+# Distribution of numerical variables
+plot_histogram(stroke_data)
+
+# Frequency graph of category variables
+plot_bar(stroke_data)
+
+# Correlation heat map (numerical variable)
+numeric_data <- select_if(stroke_data, is.numeric)
+corr <- cor(na.omit(numeric_data))
+corrplot(corr, method = "color", addCoef.col = "black")
+
+
+```
+
+```{r}
+#Examine the proportion of strokes in each category within each categorical variable
+cat_vars <- c("gender", "ever_married", "work_type", "Residence_type", "smoking_status")
+
+for (var in cat_vars) {                     # Calculate the proportion of stroke under each categorical variable in a loop
+  print(paste("stroke proportion", var, "group："))
+  
+    stroke_prop <- stroke_data %>%
+      group_by(!!sym(var), stroke) %>%     # Grouped by variables and stroke status
+      summarise(count = n()) %>%          # Calculate frequency
+      mutate(prop = count / sum(count)) %>%  # Calculate the proportion
+      filter(stroke == 1) %>%              # Only select the group =1
+      select(!!sym(var), prop)            # Only retain the variable names and proportions
+    
+  print(stroke_prop)
+}
+
+```
+
+```{r}
+#The relationship between stroke and some factors
+# stroke & age 
+ggplot(stroke_data, aes(x = age, fill = stroke)) +
+  geom_histogram(binwidth = 5, position = "dodge") +
+  labs(title = "age distribution vs stroke occurs", x = "age", y = "people") +
+  theme_minimal()
+
+# stroke & gender
+ggplot(stroke_data, aes(x = gender, fill = stroke)) +
+  geom_bar(position = "fill") +
+  labs(title = "gender vs stroke", y = "proportion") +
+  theme_minimal()
+
+# stroke & smoking_status 
+ggplot(stroke_data, aes(x = smoking_status, fill = stroke)) +
+  geom_bar(position = "fill") +
+  labs(title = "smoking status vs stroke", y = "proportion") +
+  theme_minimal()
+```
+
+
+
+
+#Exploration of the Relationship between stroke Probability and Age
+
+```{r}
+# Convert all categorical variables in the training data into factors (especially gender)
+factor_vars <- c("gender", "hypertension", "heart_disease", "ever_married",
+                 "work_type", "Residence_type", "smoking_status")
+
+for (var in factor_vars) {
+  stroke_data[[var]] <- factor(stroke_data[[var]])
+}
+train_index <- createDataPartition(stroke_data$stroke, p = 0.7, list = FALSE)
+train_data <- stroke_data[train_index, ]
+test_data <- stroke_data[-train_index, ]
+
+# Generate balanced training data
+set.seed(123)
+balanced_train_data <- ROSE(stroke ~ ., data = train_data, seed = 1)$data
+
+# Check the category distribution of the new dataset
+table(balanced_train_data$stroke)
+```
+```{r}
+# Step 1: Extract variables
+pca_data <- balanced_train_data[, c("age", "avg_glucose_level", "bmi")]
+
+# Step 2: standardization
+pca_scaled <- scale(pca_data)
+
+# Step 3: PCA
+pca_result <- prcomp(pca_scaled, center = TRUE, scale. = TRUE)
+
+# Step 4: View the principal component variance explanation
+summary(pca_result)
+
+# Step 5: Check which variables each principal component is composed of (weights)
+pca_result$rotation
+
+# Step 6: Combine the principal component score with the stroke label to form a data frame
+pca_df <- as.data.frame(pca_result$x)
+pca_df$stroke <- as.factor(balanced_train_data$stroke)  # Make sure it is of the factor type
+
+# Step 7: Visualize the principal components (PC1 vs PC2) and distinguish whether it is a stroke by color
+library(ggplot2)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = stroke)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "PCA: PC1 vs PC2（age、glucose、bmi）",
+       x = "PC1",
+       y = "PC2",
+       color = "Stroke") +
+  theme_minimal()
+
+```
+
+```{r}
+# Group the ages
+
+stroke_data <- stroke_data %>%
+  mutate(age_group = cut(age,
+                         breaks = seq(0, 100, by = 10),
+                         right = FALSE,
+                         labels = paste(seq(0, 90, by = 10), seq(10, 100, by = 10)-1, sep = "-")))
+
+# Calculate the probability of each group of strokes
+age_stroke_rate <- stroke_data %>%
+  group_by(age_group) %>%
+  summarise(
+    stroke_rate = mean(as.numeric(as.character(stroke))),
+    count = n()
+  )
+
+# visualization
+ggplot(age_stroke_rate, aes(x = age_group, y = stroke_rate)) +
+  geom_col(fill = "tomato") +
+  labs(title = "The incidence of stroke in different age groups", x = "age group", y = "probability of stroke") +
+  theme_minimal()
+
+```
+
+#Add other variables to explore the interaction
+```{r}
+#The logistic regression model contains interaction terms: age × hypertension, age × smoking status
+# Simplify the data (handle omissions and select the main variables)
+stroke_data <- na.omit(stroke_data)
+
+# Transform categorical variables
+stroke_data$hypertension <- as.factor(stroke_data$hypertension)
+stroke_data$heart_disease <- as.factor(stroke_data$heart_disease)
+stroke_data$smoking_status <- as.factor(stroke_data$smoking_status)
+stroke_data$stroke <- as.factor(stroke_data$stroke)
+
+# Logistic regression model with interaction terms
+model <- glm(stroke ~ age * hypertension + age * smoking_status + age * heart_disease,
+             data = stroke_data, family = binomial)
+
+summary(model)
+
+```
+
+
+
+#Random Forest analysis
+```{r}
+set.seed(123)
+
+
+# Train the random forest model
+Randomforest_model0 <- randomForest(
+  stroke ~ age + hypertension + heart_disease + ever_married + work_type +
+    Residence_type + avg_glucose_level + bmi + smoking_status + gender,
+  data = balanced_train_data,
+  ntree = 500,         # The number of trees
+  mtry = 3,            # The number of features of each tree
+  importance = TRUE,   # Enable variable importance calculation
+  na.action = na.omit
+)
+```
+
+
+```{r}
+# Model Overview
+print(Randomforest_model0)
+
+# Show the importance of the variable (numerical value)
+importance(Randomforest_model0)
+
+# Graphical display
+varImpPlot(Randomforest_model0, main = "The importance of variables in stroke prediction")
+
+
+# The marginal effect graph of age on stroke probability
+partialPlot(Randomforest_model0, pred.data = balanced_train_data, x.var = "age", which.class = "1",
+            main = "The marginal effect of age on stroke probability", xlab = "age", ylab = "probability of stroke")
+
+```
+
+```{r}
+set.seed(123)
+
+# 1. Classify the data
+train_index <- createDataPartition(stroke_data$stroke, p = 0.7, list = FALSE)
+train_data <- stroke_data[train_index, ]
+test_data <- stroke_data[-train_index, ]
+
+# Ensure that all categorical variables are factor
+categorical_vars <- c("gender", "ever_married", "work_type", "Residence_type", "smoking_status", "stroke")
+
+train_data[categorical_vars] <- lapply(train_data[categorical_vars], as.factor)
+test_data[categorical_vars] <- lapply(test_data[categorical_vars], as.factor)  # Add this line
+
+# 2. Balanced training set
+balanced_train_data <- ROSE(stroke ~ ., data = train_data, seed = 1)$data
+
+# 3. Force conversion to factors (ensure classification)
+balanced_train_data$stroke <- factor(balanced_train_data$stroke, levels = c(0, 1))
+train_data$stroke <- factor(train_data$stroke, levels = c(0, 1))
+test_data$stroke <- factor(test_data$stroke, levels = c(0, 1))
+
+# 4. training model
+Randomforest_model0 <- randomForest(
+  stroke ~ age + hypertension + heart_disease + ever_married + work_type +
+    Residence_type + avg_glucose_level + bmi + smoking_status + gender,
+  data = balanced_train_data,
+  ntree = 500,
+  mtry = 3,
+  importance = TRUE,
+  na.action = na.omit
+)
+
+# 5. forecast
+pred_class <- predict(Randomforest_model0, newdata = test_data)
+pred_prob <- predict(Randomforest_model0, newdata = test_data, type = "prob")[, "1"]
+
+# 6. evaluate
+conf_mat <- confusionMatrix(pred_class, test_data$stroke)
+print(conf_mat)
+
+roc_obj <- roc(test_data$stroke, pred_prob)
+auc_val <- auc(roc_obj)
+cat("AUC =", round(auc_val, 4), "\n")
+
+plot(roc_obj, main = paste("ROC Curve - AUC =", round(auc_val, 4)))
+
+# 7. Variable importance
+varImpPlot(Randomforest_model0, main = "Variable Importance")
+
+```
+```{r}
+# Obtain the predicted probability
+pred_prob <- predict(Randomforest_model0, test_data, type = "prob")[, 2]
+
+# Set a series of thresholds
+thresholds <- seq(0.1, 0.9, by = 0.05)
+f1_scores <- c()
+recalls <- c()
+
+# Calculate the F1 and Recall corresponding to each threshold in a loop
+for (t in thresholds) {
+  pred_class <- ifelse(pred_prob > t, 1, 0)
+  f1 <- F1_Score(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  recall <- Recall(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  f1_scores <- c(f1_scores, f1)
+  recalls <- c(recalls, recall)
+}
+
+# Visualize the changes of F1 and Recall with the threshold
+plot(thresholds, f1_scores, type = "b", col = "blue", ylim = c(0, 1),
+     ylab = "Score", xlab = "Threshold", main = "F1 & Recall vs Threshold")
+lines(thresholds, recalls, type = "b", col = "red")
+legend("topright", legend = c("F1 Score", "Recall"), col = c("blue", "red"), lty = 1)
+
+# Find the optimal threshold (to maximize F1)
+best_threshold <- thresholds[which.max(f1_scores)]
+cat("Best threshold based on F1 Score:", best_threshold, "\n")
+
+# Generate the final classification using the optimal threshold
+final_pred <- ifelse(pred_prob > best_threshold, 1, 0)
+
+# Output confusion matrix
+confusionMatrix(as.factor(final_pred), as.factor(test_data$stroke), positive = "1")
+```
+
+
+
+#This model fixes other variables with a "benchmark sample" and only gradually changes the age to predict the probability of stroke at different ages.
+```{r}
+
+# 1
+factor_vars <- c("gender", "hypertension", "heart_disease", "ever_married",
+                 "work_type", "Residence_type", "smoking_status")
+# 2
+for (var in factor_vars) {
+  stroke_data[[var]] <- factor(stroke_data[[var]])
+}
+train_index <- createDataPartition(stroke_data$stroke, p = 0.7, list = FALSE)
+train_data <- stroke_data[train_index, ]
+test_data <- stroke_data[-train_index, ]
+
+
+ Randomforest_model <- randomForest(
+   stroke ~ age + hypertension + heart_disease + ever_married + work_type +
+     Residence_type + avg_glucose_level + bmi + smoking_status + gender,
+   data = balanced_train_data,
+   ntree = 500,
+   mtry = 3,
+   importance = TRUE,
+   na.action = na.omit
+ )
+
+# 3. Select a benchmark sample row without any omissions
+ref_row <- stroke_data[complete.cases(stroke_data), ][1, ]
+
+# 4. Create an age sequence
+age_seq <- seq(min(stroke_data$age), max(stroke_data$age), by = 1)
+
+# 5. Construct a test dataset that only changes the age, while maintaining the baseline values for other variables
+age_test_data <- do.call(rbind, lapply(age_seq, function(a) {
+  temp <- ref_row
+  temp$age <- a
+  temp
+}))
+
+# 6. Delete useless columns (such as labels and redundant columns)
+age_test_data$stroke <- NULL
+age_test_data$age_group <- NULL 
+
+# 7. Ensure that the test data factor variable levels are exactly the same as the training data
+for (var in factor_vars) {
+  age_test_data[[var]] <- factor(as.character(age_test_data[[var]]), levels = levels(stroke_data[[var]]))
+}
+
+# 8. Ensure that the types of numerical variables are correct
+num_vars <- c("age", "avg_glucose_level", "bmi")
+for (var in num_vars) {
+  age_test_data[[var]] <- as.numeric(age_test_data[[var]])
+}
+
+# 9. Only retain the predictor variables used by the model (in the same order)
+vars_in_model <- c("age", "hypertension", "heart_disease", "ever_married", "work_type",
+                   "Residence_type", "avg_glucose_level", "bmi", "smoking_status", "gender")
+age_test_data <- age_test_data[, vars_in_model]
+
+# 10. The probability of stroke occurring is 1.
+pred_probs <- predict(Randomforest_model, newdata = age_test_data, type = "prob")[, "1"]
+
+# 11. Organize the prediction results into a data frame
+age_effect <- data.frame(age = age_seq, stroke_prob = pred_probs)
+
+# Smooth the "stroke_prob" value, with a window size of 5
+age_effect$smoothed_prob <- rollmean(age_effect$stroke_prob, k = 5, fill = NA)
+
+# Calculate the first-order difference
+age_effect$diff_prob <- c(NA, diff(age_effect$smoothed_prob))
+
+# Set a threshold for "significant increase", such as greater than 0.015
+threshold <- 0.015
+
+# Find the first position that exceeds the threshold
+rise_start_index <- which(age_effect$diff_prob > threshold)[1]
+rise_start_age <- age_effect$age[rise_start_index]
+
+# Find the peak of the stroke probability
+peak_index <- which.max(age_effect$stroke_prob)
+peak_age <- age_effect$age[peak_index]
+peak_prob <- age_effect$stroke_prob[peak_index]
+
+# The graph shows the relationship between age and stroke probability
+# ggplot(age_effect, aes(x = age, y = stroke_prob)) +
+# geom_line(color = "blue") +
+# labs(title = "The influence of age on the stroke probability",
+# x = "age", y = "Predict the probability of stroke occurrence") +
+# theme_minimal()
+
+
+## Find the starting point where the stroke probability increases significantly (use first-order difference to detect the biggest growth point) 
+# diff_probs <- diff(age_effect$stroke_prob)
+# rise_start_index <- which.max(diff_probs)
+# rise_start_age <- age_effect$age[rise_start_index]
+# 
+# # Find the peak age of the stroke probability
+# peak_index <- which.max(age_effect$stroke_prob)
+# peak_age <- age_effect$age[peak_index]
+# peak_prob <- age_effect$stroke_prob[peak_index]
+# 
+# # Draw
+# ggplot(age_effect, aes(x = age, y = stroke_prob)) +
+#   geom_line(color = "blue") +
+#   geom_vline(xintercept = rise_start_age, linetype = "dashed", color = "red") +
+#   geom_vline(xintercept = peak_age, linetype = "dashed", color = "darkgreen") +
+#   annotate("text", x = rise_start_age, y = 0.25,
+#            label = paste0("Starting from", rise_start_age, " years old \nthe probability of stroke increases significantly."),
+#            color = "red", angle = 90, hjust = -0.1, size = 4.5) +
+#   annotate("text", x = peak_age, y = peak_prob + 0.05,
+#            label = paste0("From", peak_age, " years old\nThe probability of a stroke reaches its peak"),
+#            color = "darkgreen", angle = 90, hjust = -0.1, size = 4.5) +
+#   labs(title = "The influence of age on the stroke probability",
+#        x = "age", y = "Predict the probability of stroke occurrence") +
+#   theme_minimal()
+
+# reloading
+ggplot(age_effect, aes(x = age, y = stroke_prob)) +
+  geom_line(color = "blue") +
+  geom_vline(xintercept = rise_start_age, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = peak_age, linetype = "dashed", color = "darkgreen") +
+  annotate("text", x = rise_start_age, y = 0.7,
+           label = paste0(rise_start_age, " years old"),
+           color = "red", angle = 0, hjust = 0.5, size = 4.5) +
+  annotate("text", x = peak_age, y = min(peak_prob + 0.02, 0.95),
+           label = paste0(peak_age, " years old"),
+           color = "darkgreen", angle = 0, hjust = 0.5, size = 4.5) +
+  labs(title = "The influence of age on the probability of stroke",
+       x = "age", y = "probability of stroke") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Obtain the predicted probability (the probability of stroke=1)
+pred_prob <- predict(Randomforest_model, test_data, type = "prob")[, 2]
+
+# Set a series of thresholds
+thresholds <- seq(0.1, 0.9, by = 0.05)
+f1_scores <- c()
+recalls <- c()
+
+# Calculate the F1 and Recall corresponding to each threshold in a loop
+for (t in thresholds) {
+  pred_class <- ifelse(pred_prob > t, 1, 0)
+  f1 <- F1_Score(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  recall <- Recall(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  f1_scores <- c(f1_scores, f1)
+  recalls <- c(recalls, recall)
+}
+
+# Visualize the changes of F1 and Recall with the threshold
+plot(thresholds, f1_scores, type = "b", col = "blue", ylim = c(0, 1),
+     ylab = "Score", xlab = "Threshold", main = "F1 & Recall vs Threshold")
+lines(thresholds, recalls, type = "b", col = "red")
+legend("topright", legend = c("F1 Score", "Recall"), col = c("blue", "red"), lty = 1)
+
+# Find the optimal threshold (to maximize F1)
+best_threshold <- thresholds[which.max(f1_scores)]
+cat("Best threshold based on F1 Score:", best_threshold, "\n")
+
+# Generate the final classification using the optimal threshold
+final_pred <- ifelse(pred_prob > best_threshold, 1, 0)
+
+# Output confusion matrix
+confusionMatrix(as.factor(final_pred), as.factor(test_data$stroke), positive = "1")
+```
+
+
+```{r}
+# Training data structure
+str(balanced_train_data)
+# Predicted data structure
+str(age_test_data)
+
+```
+
+
+
+
+```{r}
+# Calculate the first-order difference
+diff_probs <- diff(pred_probs)
+
+# Find the biggest growth point
+max_diff_index <- which.max(diff_probs)
+age_critical_point <- age_seq[max_diff_index]
+
+cat("The age critical point at which the risk surges is approximately:", age_critical_point, "\n")
+
+df_diff <- data.frame(
+  age = age_seq[-1],  # Because the length decreases by 1 after diff
+  diff_prob = diff_probs
+)
+
+ggplot(df_diff, aes(x = age, y = diff_prob)) +
+  geom_line(color = "red", size = 1) +
+  geom_vline(xintercept = age_critical_point, linetype = "dashed", color = "blue") +
+  labs(title = "Age risk jump rate", x = "age", y = "Growth rate of stroke probability") +
+  theme_minimal()
+
+```
+
+#The interaction curve of age × smoking status
+```{r}
+# Variable value
+age_seq <- seq(min(stroke_data$age), max(stroke_data$age), by = 1)
+smoking_levels <- levels(stroke_data$smoking_status)
+
+#Construct the test data set
+pred_list <- lapply(smoking_levels, function(smoke_status) {
+  # Select a typical individual (benchmark row)
+  ref_row <- stroke_data[1, ]
+  ref_row$smoking_status <- smoke_status  # Fixed smoking status
+  
+  # Construct data according to age changes
+  temp_data <- do.call("rbind", lapply(age_seq, function(a) {
+    temp <- ref_row
+    temp$age <- a
+    temp
+  }))
+  
+  # Variable type conversion (keeping consistent)
+  factor_vars <- c("hypertension", "heart_disease", "ever_married",
+                   "work_type", "Residence_type", "smoking_status", "gender")
+  for (var in factor_vars) {
+    temp_data[[var]] <- factor(temp_data[[var]], levels = levels(stroke_data[[var]]))
+  }
+  temp_data$age <- as.numeric(temp_data$age)
+  temp_data$avg_glucose_level <- as.numeric(temp_data$avg_glucose_level)
+  temp_data$bmi <- as.numeric(temp_data$bmi)
+  
+  temp_data$stroke <- NULL
+  
+  # prediction probability
+  pred_prob <- predict(Randomforest_model, newdata = temp_data, type = "prob")[, "1"]
+  
+  data.frame(age = age_seq, smoking_status = smoke_status, stroke_prob = pred_prob)
+})
+
+# combined result
+df_pred <- do.call(rbind, pred_list)
+
+# graw
+# ggplot(df_pred, aes(x = age, y = stroke_prob, color = smoking_status)) +
+#   geom_line(size = 1.2) +
+#   labs(title = "The interaction effect of age and smoking status on the stroke probability",
+#        x = age, y = "Predict the probability of stroke occurrence", color = "Smoking status") +
+#   theme_minimal()
+
+# Add key inflection point calculation 
+critical_points <- df_pred %>%
+  group_by(smoking_status) %>%
+  arrange(age) %>%
+  mutate(diff_prob = c(NA, diff(stroke_prob))) %>%
+  filter(!is.na(diff_prob)) %>%
+  slice_max(diff_prob, n = 1)
+
+# Print
+print(critical_points[, c("smoking_status", "age", "diff_prob")], row.names = FALSE)
+
+
+# Filter out "Unknown" and reset factor levels
+df_pred_filtered <- df_pred %>% 
+  filter(smoking_status != "Unknown") %>%
+  mutate(smoking_status = factor(smoking_status, levels = c("formerly smoked", "never smoked", "smokes")))
+
+critical_points_filtered <- critical_points %>%
+  filter(smoking_status != "Unknown") %>%
+  mutate(smoking_status = factor(smoking_status, levels = c("formerly smoked", "never smoked", "smokes")))
+
+# Plot
+ggplot(df_pred_filtered, aes(x = age, y = stroke_prob, color = smoking_status)) +
+  geom_line(size = 1.2) +
+  geom_vline(
+    data = critical_points_filtered,
+    aes(xintercept = age, color = smoking_status),
+    linetype = "dashed", alpha = 0.6
+  ) +
+  geom_point(
+    data = critical_points_filtered,
+    aes(x = age, y = stroke_prob),
+    color = "black", size = 3, shape = 1
+  ) +
+  labs(
+    title = "Effect of Age and Smoking Status on Stroke Probability",
+    x = "Age", y = "Stroke Probability",
+    color = "Smoking Status",
+    caption = paste("Critical ages:", paste(round(critical_points_filtered$age, 1), collapse = ", "), "years old")
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+train_index <- createDataPartition(stroke_data$stroke, p = 0.7, list = FALSE)
+train_data <- stroke_data[train_index, ]
+test_data <- stroke_data[-train_index, ]
+#step 1: Train the randomforest model (using the data balanced by ROSE)
+set.seed(123)
+RF_age_glucose <- randomForest(
+  stroke ~ age + hypertension + heart_disease + ever_married + work_type +
+    Residence_type + avg_glucose_level + bmi + smoking_status + gender,
+  data = balanced_train_data,
+  ntree = 500,
+  mtry = 3,
+  importance = TRUE
+)
+
+# step 2: Construct the variable combination grid of age × avg_glucose_level
+age_seq <- seq(20, 85, by = 1)
+glucose_seq <- seq(50, 250, by = 5)
+
+# Create a variable combination grid
+grid <- expand.grid(age = age_seq, avg_glucose_level = glucose_seq)
+
+# Obtain a representative individual (ref_row) : used to fix other variables
+ref_row <- stroke_data[1, ]
+ref_row$age <- NULL
+ref_row$avg_glucose_level <- NULL
+ref_row$stroke <- NULL
+
+# Build complete prediction data
+predict_data <- cbind(grid, ref_row[rep(1, nrow(grid)), ])
+
+# Ensure that the variable types are consistent with the training set
+factor_vars <- c("hypertension", "heart_disease", "ever_married",
+                 "work_type", "Residence_type", "smoking_status", "gender")
+for (var in factor_vars) {
+  predict_data[[var]] <- factor(predict_data[[var]], levels = levels(stroke_data[[var]]))
+}
+predict_data$bmi <- as.numeric(predict_data$bmi)
+
+# step 3: Predict the probability of stroke occurrence
+predict_data$stroke_prob <- predict(RF_age_glucose, newdata = predict_data, type = "prob")[, "1"]
+
+
+```
+
+
+
+```{r}
+# 1. Select several points with the highest stroke_prob from the predicted data as key points
+critical_points <- predict_data %>%
+  slice_max(order_by = stroke_prob, n = 8)
+
+# 2. Filter out the points where either "age" or "avg_glucose_level" is missing or exceeds the plotting coordinate range.
+critical_points <- critical_points %>%
+  filter(!is.na(age), !is.na(avg_glucose_level),
+         age >= 20, age <= 85,
+         avg_glucose_level >= 50, avg_glucose_level <= 250)
+
+# 3. Redraw the graphics
+ggplot(predict_data, aes(x = age, y = avg_glucose_level, z = stroke_prob)) +
+  geom_contour_filled(breaks = seq(0, 1, by = 0.1), alpha = 0.8) +
+  geom_contour(color = "white", alpha = 0.5, linewidth = 0.3) +
+  scale_fill_viridis_d(option = "magma", direction = -1) +
+  geom_point(data = critical_points, aes(x = age, y = avg_glucose_level), 
+             shape = 21, fill = "yellow", color = "black", size = 3) +
+  geom_text_repel(data = critical_points, 
+                  aes(label = paste0(round(age), "y\n", round(stroke_prob * 100, 1), "%")),
+                  size = 3, color = "white") +
+  labs(
+    title = "Stroke Probability Landscape by Age and Glucose Level",
+    subtitle = "Contour bands show probability intervals",
+    x = "Age (years)", 
+    y = "Average Glucose Level (mg/dL)",
+    fill = "Stroke Risk"
+  ) +
+  coord_cartesian(expand = TRUE) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+
+```{r}
+# step 1: Obtain the predicted probability
+pred_prob <- predict(RF_age_glucose, test_data, type = "prob")[, 2]
+
+# step 2: Set multiple thresholds and calculate F1 and Recall
+thresholds <- seq(0.1, 0.9, by = 0.05)
+f1_scores <- c()
+recalls <- c()
+
+for (t in thresholds) {
+  pred_class <- ifelse(pred_prob > t, 1, 0)
+  f1 <- F1_Score(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  recall <- Recall(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  f1_scores <- c(f1_scores, f1)
+  recalls <- c(recalls, recall)
+}
+
+# step 3: Find the optimal threshold (maximum F1 score)
+best_threshold <- thresholds[which.max(f1_scores)]
+cat("Best threshold based on F1 Score:", best_threshold, "\n")
+
+# step 4: Classification prediction is carried out using the optimal threshold
+final_pred <- ifelse(pred_prob > best_threshold, 1, 0)
+
+# step 5: Confusion matrix + Evaluation index
+cm <- confusionMatrix(as.factor(final_pred), as.factor(test_data$stroke), positive = "1")
+print(cm)
+
+# step 6: Draw the ROC curve and calculate the AUC
+roc_obj <- roc(test_data$stroke, pred_prob)
+auc_value <- auc(roc_obj)
+cat("AUC:", auc_value, "\n")
+
+# Visualization of ROC curve
+plot(roc_obj, col = "blue", main = "ROC Curve", print.auc = TRUE)
+
+# step 7: Visualize F1 and Recall at different thresholds
+plot_df <- data.frame(threshold = thresholds, F1 = f1_scores, Recall = recalls)
+
+ggplot(plot_df, aes(x = threshold)) +
+  geom_line(aes(y = F1, color = "F1 Score")) +
+  geom_line(aes(y = Recall, color = "Recall")) +
+  geom_vline(xintercept = best_threshold, linetype = "dashed", color = "black") +
+  labs(title = "F1 Score & Recall vs. Threshold",
+       x = "Threshold", y = "Metric Value",
+       color = "Metric") +
+  theme_minimal()
+
+
+```
+Confusion Matrix and Statistics
+
+          Reference
+Prediction   0   1
+         0 1392  43
+         1   27  31
+
+Accuracy        : 0.9531
+Kappa           : 0.4455
+Sensitivity     : 0.4189
+Specificity     : 0.9810
+Precision       : 0.5345
+F1 Score        : 0.4697
+Balanced Acc    : 0.7000
+AUC             : 0.9176
+
+
+
+
+
+```{r}
+#Used for age × a certain categorical variable
+plot_age_interaction_critical_point <- function(data, rf_model, group_var, baseline_row_index = 1) {
+  
+  # Variable type convention
+  factor_vars <- c("stroke", "hypertension", "heart_disease", "ever_married",
+                   "work_type", "Residence_type", "smoking_status", "gender")
+  
+  # age range
+  age_seq <- seq(min(data$age), max(data$age), by = 1)
+  
+  # Group list
+  group_levels <- levels(data[[group_var]])
+  
+  # Construct the test data set, group and change age respectively, and fix group_var
+  pred_list <- lapply(group_levels, function(g_level) {
+    ref_row <- data[baseline_row_index, ]
+    ref_row[[group_var]] <- g_level
+    
+    temp_data <- do.call("rbind", lapply(age_seq, function(a) {
+      temp <- ref_row
+      temp$age <- a
+      temp
+    }))
+    
+    # Type conversions remain consistent
+    for (var in factor_vars) {
+      if (var %in% names(temp_data)) {
+        temp_data[[var]] <- factor(temp_data[[var]], levels = levels(data[[var]]))
+      }
+    }
+    temp_data$age <- as.numeric(temp_data$age)
+    if ("avg_glucose_level" %in% names(temp_data)) temp_data$avg_glucose_level <- as.numeric(temp_data$avg_glucose_level)
+    if ("bmi" %in% names(temp_data)) temp_data$bmi <- as.numeric(temp_data$bmi)
+    
+    # Delete the target variable
+    if ("stroke" %in% names(temp_data)) temp_data$stroke <- NULL
+    
+    # prediction probability
+    pred_prob <- predict(rf_model, newdata = temp_data, type = "prob")[, "1"]
+    
+    data.frame(age = age_seq, 
+               group = g_level, 
+               stroke_prob = pred_prob,
+               stringsAsFactors = FALSE)
+  })
+  
+  df_pred <- do.call(rbind, pred_list)
+  
+  # Calculate the growth rate and inflection point
+  critical_points <- df_pred %>%
+    group_by(group) %>%
+    arrange(age) %>%
+    mutate(diff_prob = c(NA, diff(stroke_prob))) %>%
+    filter(!is.na(diff_prob)) %>%
+    slice_max(diff_prob, n = 1) %>%
+    select(group, age, diff_prob)
+  
+  print(critical_points)
+  
+  # draw
+  p <- ggplot(df_pred %>%
+                group_by(group) %>%
+                arrange(age) %>%
+                mutate(diff_prob = c(NA, diff(stroke_prob))) %>%
+                filter(!is.na(diff_prob)),
+              aes(x = age, y = diff_prob, color = group)) +
+    geom_line(size = 1) +
+    geom_vline(data = critical_points, aes(xintercept = age, color = group),
+               linetype = "dashed") +
+    geom_point(data = critical_points, aes(x = age, y = diff_prob, color = group),
+               size = 3) +
+    labs(title = paste("age ×", group_var, "stroke probability growth rate and inflection point"),
+         x = "age", y = "Stroke probability growth rate", color = group_var) +
+    theme_minimal()
+  
+  print(p)
+}
+
+```
+
+```{r}
+plot_age_interaction_critical_point(stroke_data, Randomforest_model, "hypertension")
+```
+
+```{r}
+plot_age_interaction_critical_point(stroke_data, Randomforest_model, "gender")
+```
+
+```{r}
+plot_age_interaction_critical_point(stroke_data, Randomforest_model, "heart_disease")
+```
+
+```{r}
+#plot_age_interaction_critical_point(stroke_data, Randomforest_model, "")
+```
+
+
+
+#Evaluate the performance of the randomforest model
+```{r}
+
+# Obtain the predicted probability (the probability of stroke=1)
+pred_prob <- predict(Randomforest_model, test_data, type = "prob")[, 2]
+
+# Set a series of thresholds
+thresholds <- seq(0.1, 0.9, by = 0.05)
+f1_scores <- c()
+recalls <- c()
+
+# Calculate the F1 and Recall corresponding to each threshold in a loop
+for (t in thresholds) {
+  pred_class <- ifelse(pred_prob > t, 1, 0)
+  f1 <- F1_Score(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  recall <- Recall(y_pred = pred_class, y_true = test_data$stroke, positive = "1")
+  f1_scores <- c(f1_scores, f1)
+  recalls <- c(recalls, recall)
+}
+
+# Visualize the changes of F1 and Recall with the threshold
+plot(thresholds, f1_scores, type = "b", col = "blue", ylim = c(0, 1),
+     ylab = "Score", xlab = "Threshold", main = "F1 & Recall vs Threshold")
+lines(thresholds, recalls, type = "b", col = "red")
+legend("topright", legend = c("F1 Score", "Recall"), col = c("blue", "red"), lty = 1)
+
+# Find the optimal threshold (to maximize F1)
+best_threshold <- thresholds[which.max(f1_scores)]
+cat("Best threshold based on F1 Score:", best_threshold, "\n")
+
+# Generate the final classification using the optimal threshold
+final_pred <- ifelse(pred_prob > best_threshold, 1, 0)
+
+# Output confusion matrix
+confusionMatrix(as.factor(final_pred), as.factor(test_data$stroke), positive = "1")
+
+```
