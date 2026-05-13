@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"d:/Desktop/csv-cleaner-cli/\" 2>/dev/null && echo \"--- exists\" || echo \"--- gone\")",
+      "Read(//d/Desktop/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(git add *)",
+      "Bash(gh repo *)",
+      "Bash(git clone *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(gh --version)"
+    ]
+  }
+}
